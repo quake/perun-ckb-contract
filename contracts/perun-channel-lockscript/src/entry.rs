@@ -6,8 +6,7 @@ use core::result::Result;
 use ckb_std::{
     ckb_constants::Source,
     ckb_types::{bytes::Bytes, prelude::*},
-    high_level::{load_cell_lock_hash, load_cell_type, load_script},
-    syscalls::SysError,
+    high_level::{load_cell_lock_hash, load_cell_type, load_script, QueryIter},
 };
 use perun_common::{error::Error, perun_types::ChannelConstants};
 
@@ -30,32 +29,27 @@ pub fn main() -> Result<(), Error> {
         return Err(Error::PCLSWithArgs);
     }
 
-    // locate the ChannelConstants in the type script of the input cell.
-    // the best practice is to loop all the input cells in the group
-    for i in 0.. {
-        // Loop over all input cells.
-        let type_script = match load_cell_type(i, Source::GroupInput) {
-            Ok(Some(script)) => script,
-            Ok(None) => panic!("type script not found"),
-            Err(SysError::IndexOutOfBound) => break,
-            Err(err) => return Err(err.into()),
-        };
-        let type_script_args: Bytes = type_script.args().unpack();
+    let group_inputs_iter = QueryIter::new(load_cell_type, Source::GroupInput);
+    let all_are_participants = group_inputs_iter.into_iter().all(|type_script| {
+        if let Some(script) = type_script {
+            let type_script_args: Bytes = script.args().unpack();
 
-        let constants = ChannelConstants::from_slice(&type_script_args)
-            .expect("unable to parse args as channel parameters");
+            let constants = ChannelConstants::from_slice(&type_script_args)
+                .expect("unable to parse args as channel parameters");
 
-        let is_participant = verify_is_participant(
-            &constants.params().party_a().unlock_script_hash().unpack(),
-            &constants.params().party_b().unlock_script_hash().unpack(),
-        )?;
-
-        if !is_participant {
-            return Err(Error::NotParticipant);
+            verify_is_participant(
+                &constants.params().party_a().unlock_script_hash().unpack(),
+                &constants.params().party_b().unlock_script_hash().unpack(),
+            )
+        } else {
+            false
         }
+    });
+    if all_are_participants {
+        Ok(())
+    } else {
+        Err(Error::NotParticipant)
     }
-
-    return Ok(());
 }
 
 /// check_is_participant checks if the current transaction is executed by a channel participant.
@@ -63,19 +57,10 @@ pub fn main() -> Result<(), Error> {
 pub fn verify_is_participant(
     unlock_script_hash_a: &[u8; 32],
     unlock_script_hash_b: &[u8; 32],
-) -> Result<bool, Error> {
-    for i in 0.. {
-        // Loop over all input cells.
-        let cell_lock_script_hash = match load_cell_lock_hash(i, Source::Input) {
-            Ok(lock_hash) => lock_hash,
-            Err(SysError::IndexOutOfBound) => return Ok(false),
-            Err(err) => return Err(err.into()),
-        };
-        if cell_lock_script_hash[..] == unlock_script_hash_a[..]
+) -> bool {
+    let inputs_iter = QueryIter::new(load_cell_lock_hash, Source::Input);
+    inputs_iter.into_iter().any(|cell_lock_script_hash| {
+        cell_lock_script_hash[..] == unlock_script_hash_a[..]
             || cell_lock_script_hash[..] == unlock_script_hash_b[..]
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    })
 }
